@@ -19,8 +19,9 @@
 //                  word, which is read at its first pixel and written
 //                  after its last)
 //   circle, per step of the midpoint walk: one cycle (the step's up to
-//                  four spans, clipped), then per visible span one cycle
-//                  and one destination word per cycle (as a fill)
+//                  four spans, two where dx = dy, clipped), then per
+//                  visible span one cycle and one destination word per
+//                  cycle (as a fill)
 //   oval, three cycles (the products: walk start values and stop limits),
 //                  then per walk one cycle and per step one cycle per
 //                  move of the rounding walk and one (the point), three
@@ -78,7 +79,7 @@ reg  [31:0] r_size;
 reg  [23:0] r_srow;
 reg  [18:0] r_scol;
 reg [127:0] r_pal, r_fkeep, r_fval, r_gmask;
-reg  [31:0] r_ss [0:5];       // sspr: SXQ, SXS, SYQ, SYS, SDIV, SLW
+reg  [31:0] r_ss [0:5];       // sspr: SXQ, SXS, SYQ, SYS, SDIV (unused), SLW
 reg  [28:0] r_map0;           // map row: pointer, high, tiles - 1
 reg   [8:0] r_map1;           // map row: layers, draw tile 0
 reg  [31:0] r_tl [0:8];       // tline: TL0-8
@@ -232,11 +233,10 @@ endfunction
 wire  [4:0] nk_first = first1(mneed);
 wire  [4:0] nk_next  = first1(mneed & (16'hfffe << k));
 
-// sspr state: column DDA (c + cr / dw), row DDA (sr + rr / dh), row
+// sspr state: column DDA (c.cr in 16.16), row DDA (sr.rr), row
 // buffer (the loaded sheet words of row lrow), pixel position
 wire [15:0] c0 = r_ss[0][15:0], cr0 = r_ss[0][31:16], cqs = r_ss[1][15:0], crs = r_ss[1][31:16];
 wire [15:0] sy0 = r_ss[2][15:0], rr0 = r_ss[2][31:16], rqs = r_ss[3][15:0], rrs = r_ss[3][31:16];
-wire [15:0] dw = r_ss[4][15:0], dh = r_ss[4][31:16];
 wire  [3:0] lw0 = r_ss[5][3:0], lw1 = r_ss[5][7:4];
 wire        noload = r_ss[5][8];
 wire  [2:0] pi0 = r_ss[5][18:16];
@@ -248,27 +248,23 @@ reg         loaded, pfirst;
 reg   [2:0] pi;
 reg   [6:0] pcnt;
 
-// one DDA step: q + r/d by qs + rs/d, backwards when `back`; d = 0 is the
-// modulus 65536 (sspr's 16.16 steps: in 16 bits + 65536 and - 65536 are no
-// change, only the forward compare sees it)
-function [31:0] dda(input [15:0] q, input [15:0] r, input [15:0] qs, input [15:0] rs, input [15:0] d, input back);
+// one DDA step in 16.16: q.r by qs.rs, backwards when `back` (the
+// fraction's carry or borrow steps q)
+function [31:0] dda(input [15:0] q, input [15:0] r, input [15:0] qs, input [15:0] rs, input back);
 	reg [16:0] t;
-	reg        cy;
 	begin
 		if (back) begin
-			t  = {1'b0, r} - {1'b0, rs};
-			cy = t[16];
-			dda = {cy ? t[15:0] + d : t[15:0], q - qs - {15'd0, cy}};
+			t   = {1'b0, r} - {1'b0, rs};
+			dda = {t[15:0], q - qs - {15'd0, t[16]}};
 		end else begin
-			t  = {1'b0, r} + {1'b0, rs};
-			cy = t >= {d == 16'd0, d};
-			dda = {cy ? t[15:0] - d : t[15:0], q + qs + {15'd0, cy}};
+			t   = {1'b0, r} + {1'b0, rs};
+			dda = {t[15:0], q + qs + {15'd0, t[16]}};
 		end
 	end
 endfunction
 
-wire [31:0] col_next = dda(c, cr, cqs, crs, dw, flip);
-wire [31:0] row_next = dda(sr, rr, rqs, rrs, dh, rstep_n);
+wire [31:0] col_next = dda(c, cr, cqs, crs, flip);
+wire [31:0] row_next = dda(sr, rr, rqs, rrs, rstep_n);
 wire        row_ok   = sr[15:7] == 9'd0;
 wire        need     = row_ok && !noload && (!loaded || lrow != sr);
 wire [13:0] ld_a     = {gbpage, 6'd0} + {sr[6:0], 4'd0} + {10'd0, lw};
@@ -349,9 +345,11 @@ wire signed [17:0] cca_y = cxa_y > c_x0 ? cxa_y : c_x0, ccb_y = cxb_y < c_x1 ? c
 wire        c_okx  = cca_x <= ccb_x, c_oky = cca_y <= ccb_y;
 wire        c_in_a = cya >= c_y0 && cya < c_y1, c_in_b = cyb >= c_y0 && cyb < c_y1;
 wire        c_in_c = cyc >= c_y0 && cyc < c_y1, c_in_d = cyd >= c_y0 && cyd < c_y1;
-// dx moves on (err >= r - 1) or the walk ends after this step
+// dx moves on (err >= r - 1) or the walk ends after this step; C and D
+// only when dx != dy (else they are A and B again: the second span would
+// read the word the first one writes in that cycle)
 wire        c_mv   = !(cerr < $signed({{4{crm1[11]}}, crm1}));
-wire        c_cd   = c_mv || cdx <= cdy;
+wire        c_cd   = (c_mv || cdx <= cdy) && cdx != cdy;
 wire  [3:0] c_vis  = {c_cd && cdx != 12'sd0 && c_in_d && c_oky, c_cd && c_in_c && c_oky,
                       cdy != 12'sd0 && c_in_b && c_okx, c_in_a && c_okx};
 wire signed [15:0] c_ndy = {{4{cdy[11]}}, cdy} + 16'sd1;

@@ -5,7 +5,10 @@ setup slack of the core clock, in ns, over seeds 1-11: the RTL before the
 timing work of 2026-11-23 (described below), after it, and with the
 memory system of 2026-11-24 (D$ request with the miss and a write-back
 buffer, radix-4 divider, the table unit's lookup cache, performance
-counters; see the end), and with `p8.fdiv` on the divider (that evening):
+counters; see the end), with `p8.fdiv` on the divider (that evening),
+with `p8.stv` (2026-11-25), with sspr's DDAs stepping in 16.16 through
+the divisor register (a divisor of 0 meaning 65536), and as built now
+(16.16 steps only, the circle without its repeated spans):
 
 | seed       | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9      | 10     | 11     |
 |------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
@@ -13,6 +16,9 @@ counters; see the end), and with `p8.fdiv` on the divider (that evening):
 | 2026-11-23 | +0.179 | -0.383 | +0.164 | +0.290 | +0.271 | +0.174 | +0.209 | +0.322 | -0.379 | -0.013 | -0.674 |
 | 2026-11-24 | -0.190 | -0.085 | -0.065 | +0.072 | -0.137 | +0.080 | -0.062 | -0.210 | +0.149 | -0.017 | -0.172 |
 | + p8.fdiv  | -0.507 | -0.089 | -0.213 | +0.207 | +0.364 | +0.183 | +0.287 | -0.385 | +0.181 | -0.099 | +0.189 |
+| + p8.stv   | +0.043 | -0.258 | -0.204 | +0.122 | +0.267 | +0.149 | -0.780 | +0.211 | +0.364 | +0.022 | +0.291 |
+| sspr 16.16 | -0.535 | -0.052 | -0.232 | -0.151 | -0.112 | +0.358 | +0.139 | -0.202 | -0.156 | -0.034 | +0.023 |
+| now        | -0.472 | -0.069 | +0.227 | +0.450 | -0.202 | -0.366 | +0.007 | -0.582 | -0.131 | +0.192 | -0.453 |
 
 The timing work took the mean from -0.18 to +0.02 ns (7 seeds of 11
 passing instead of 4); the memory system gave back 0.07 ns of it (mean
@@ -20,10 +26,16 @@ passing instead of 4); the memory system gave back 0.07 ns of it (mean
 0). `p8.fdiv` (the divider's start state for a 16.16 dividend, the
 overflow check in its prep cycle, two more predecode terms) costs
 nothing: mean +0.01 ns, 6 of 11 passing, the spread of any netlist
-change. The project builds with seed 5 (+0.364 ns setup, +0.133 ns hold,
-HDMI +0.541 ns). Check every clock in the timing summary: at seed 4 of the
-2026-11-23 RTL the core clock passed but the framework's HDMI clock
-missed by 0.018 ns.
+change. `p8.stv` neither (mean +0.02 ns, 8 of 11). The sspr DDAs in
+16.16 cost about 0.1 ns (mean -0.09 ns, 3 of 11; the blitter's paths
+showed up among the near-critical ones, though the worst stayed the
+CPU's), and neither keeping the divisor register with its zero test done
+when it is written (mean -0.17 ns over seeds 1-6) nor dropping it (16.16
+only, the RTL now: mean -0.13 ns, 4 of 11) won it back; the circle's
+fix, two spans fewer where dx = dy, is in both. The project builds with
+seed 4 (+0.450 ns setup, +0.246 ns hold, HDMI +0.471 ns). Check every
+clock in the timing summary: at seed 4 of the 2026-11-23 RTL the core
+clock passed but the framework's HDMI clock missed by 0.018 ns.
 
 Every change to the design moves the placement, so a single seed says
 little: the worst path of one seed moves by about +-0.3 ns with any edit,
