@@ -142,7 +142,7 @@ circle, and 3 between the walks.
 | 0x130 | FKEEP0-3 | fill/glyph ink per row & 3: keep nibbles of 8 pixels |
 | 0x140 | FVAL0-3  | fill/glyph ink: value nibbles |
 | 0x150 | GMASK0-3 | glyph: 16-bit pixel mask per row (2 rows per word) |
-| 0x160 | SXQ, SXS, SYQ, SYS, SDIV, SLW | sspr: column / row DDAs (start, step, divisor) and the sheet words to load per row |
+| 0x160 | SXQ, SXS, SYQ, SYS, SDIV, SLW | sspr: column / row DDAs (start, step, divisor; a divisor of 0 is 65536, the 16.16 steps the runtime uses) and the sheet words to load per row |
 | 0x178 | MAP0 | map row: 15-0 map pointer of the first tile (address = pointer & 0xffff for a map at 0x8000+, else 0x1000 + (pointer & 0x1fff)), 16 high map, 28-24 tiles - 1 (SROW 2-0: first pixel row in the tiles, SCOL: as a blit over the row's pixels) |
 | 0x17c | MAP1 | map row: 7-0 layers (0 = all tiles), 8 draw tile 0 (0x5f36 & 8) |
 | 0x180 | TL0-1 | tline: map x, y of the first pixel (16.16, masked); PAL is the write table, GMASK the one for pattern bits of 1, SROW 23-16 the sheet base |

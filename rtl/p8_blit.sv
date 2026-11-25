@@ -248,7 +248,9 @@ reg         loaded, pfirst;
 reg   [2:0] pi;
 reg   [6:0] pcnt;
 
-// one DDA step: q + r/d by qs + rs/d, backwards when `back`
+// one DDA step: q + r/d by qs + rs/d, backwards when `back`; d = 0 is the
+// modulus 65536 (sspr's 16.16 steps: in 16 bits + 65536 and - 65536 are no
+// change, only the forward compare sees it)
 function [31:0] dda(input [15:0] q, input [15:0] r, input [15:0] qs, input [15:0] rs, input [15:0] d, input back);
 	reg [16:0] t;
 	reg        cy;
@@ -259,7 +261,7 @@ function [31:0] dda(input [15:0] q, input [15:0] r, input [15:0] qs, input [15:0
 			dda = {cy ? t[15:0] + d : t[15:0], q - qs - {15'd0, cy}};
 		end else begin
 			t  = {1'b0, r} + {1'b0, rs};
-			cy = t >= {1'b0, d};
+			cy = t >= {d == 16'd0, d};
 			dda = {cy ? t[15:0] - d : t[15:0], q + qs + {15'd0, cy}};
 		end
 	end
