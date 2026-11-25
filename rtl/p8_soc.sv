@@ -113,42 +113,44 @@ assign running = !cpu_reset;
 // ---------------------------------------------------------------- CPU
 
 wire [31:0] if_addr, if_data, if_data0, if_data1;
-wire [63:0] if_line0, if_line1;
-wire        if_word;
-wire        if_way;
-wire        if_valid, if_adv, if_redir;
+wire  [3:0] if_way;
+wire        if_valid, if_adv, if_ren, if_reread;
 wire [28:0] if_pre0, if_pre1;
-wire [31:0] de_addr, dm_addr, dm_wdata;
-wire        de_load, dm_rd, dm_wr, dm_fencei, dm_hfind, dm_hnum, dm_zline;
+wire [13:0] de_addr;
+wire [31:0] dm_addr, dm_wdata;
+wire        dm_rd, dm_wr, dm_fencei, dm_hfind, dm_hnum, dm_zline;
 wire [31:0] dm_hkey, p8heap;
 wire  [3:0] dm_be;
-reg  [31:0] dm_rdata0, dm_rdata1;
-reg         dm_rsel1;
+wire [31:0] dm_rdata0, dm_rdata1;
+wire        dm_rsel1;
 reg         dm_ready, dm_done;
 
-// PICO-8 RAM read port: any CPU load in E (see below), else the blitter
-// (while it owns the RAM) or the vblank copy
+// PICO-8 RAM read ports (see below): the CPU's copy, and the blitter's
+// (while it owns the RAM) or the vblank copy's
 wire        blt_own;
-wire [13:0] cp_addr, blt_raddr, p8_raddr;
-wire        cpu_p8_rd    = de_load && !blt_own;
-wire [13:0] p8_raddr_reg = blt_own ? blt_raddr : cp_addr;
+wire [13:0] cp_addr, blt_raddr, cpu_raddr;
 
 // table unit (p8.hfind), see below
 wire        tu_active, tu_rd, tu_done;
 wire [31:0] tu_addr, tu_result;
+// performance events (rv32_cpu's counters 0-7)
+wire  [2:0] ic_pm;
+wire  [3:0] dc_pm;
+wire        tu_pm;
 
 rv32_cpu cpu (
 	.clk(clk), .reset(cpu_reset),
-	.if_addr(if_addr), .if_adv(if_adv), .if_redir(if_redir), .if_data(if_data), .if_valid(if_valid),
+	.if_addr(if_addr), .if_adv(if_adv), .if_ren(if_ren), .if_reread(if_reread), .if_data(if_data), .if_valid(if_valid),
 	.if_data0(if_data0), .if_data1(if_data1), .if_pre0(if_pre0), .if_pre1(if_pre1), .if_way(if_way),
-	.if_line0(if_line0), .if_line1(if_line1), .if_word(if_word),
-	.de_addr(de_addr), .de_load(de_load),
-	.ra_cpu(cpu_p8_rd), .ra_other(p8_raddr_reg), .ra_addr(p8_raddr),
+	.de_addr(de_addr), .ra_addr(cpu_raddr),
 	.dm_addr(dm_addr), .dm_rd(dm_rd), .dm_wr(dm_wr), .dm_be(dm_be),
 	.dm_wdata(dm_wdata), .dm_fencei(dm_fencei),
 	.dm_hfind(dm_hfind), .dm_hnum(dm_hnum), .dm_zline(dm_zline), .dm_hkey(dm_hkey), .p8heap(p8heap),
-	.dm_rdata0(dm_rdata0), .dm_rdata1(dm_rdata1), .dm_rsel1(dm_rsel1), .dm_ready(dm_ready), .dm_done(dm_done),
-	.dm_hres(tu_result)
+	.dm_rdata0(dm_rdata0), .dm_rdata1(dm_rdata1), .dm_rsel1(dm_rsel1),
+	.dm_pdata(p8_qc), .dm_mdata(mmio_q_r), .dm_p8(m_p8), .dm_mmio(!m_ddr && !m_p8),
+	.dm_ready(dm_ready), .dm_done(dm_done),
+	.dm_hres(tu_result),
+	.pm_ev({tu_pm, dc_pm, ic_pm})
 );
 
 wire [3:0] m_region = dm_addr[31:28];
@@ -164,7 +166,7 @@ wire        dc_req, dc_gnt, dc_rd, dc_we, dc_ready, dc_flush_done, dc_zl_done;
 wire [21:0] dc_maddr;
 wire [63:0] dc_mwdata;
 wire [31:0] dc_rdata0, dc_rdata1;
-wire        dc_rhit1;
+wire        dc_rhit1, dc_t_rhit1, dc_t_ready;
 wire [63:0] dc_rdata64_0, dc_rdata64_1;
 wire        ld_req, ld_gnt, ld_we;
 wire [21:0] ld_addr;
@@ -178,27 +180,28 @@ reg  [63:0] ss_wdata;
 wire        ss_gnt;
 reg   [1:0] fence_st;
 
-p8_icache icache (
+p8_icache #(.WAYS(4)) icache (
 	.clk(clk), .reset(cpu_reset),
-	.addr(if_addr), .adv(if_adv), .redir(if_redir), .data(if_data), .valid(if_valid),
+	.addr(if_addr), .adv(if_adv), .ren(if_ren), .reread(if_reread), .data(if_data), .valid(if_valid),
 	.data0(if_data0), .data1(if_data1), .pre0(if_pre0), .pre1(if_pre1), .way_q(if_way),
-	.line0(if_line0), .line1(if_line1), .word_q(if_word),
-	.inval(fence_st == 2'd2), .inval_done(ic_inval_done),
+	.inval(fence_st == 2'd2), .inval_done(ic_inval_done), .pm(ic_pm),
 	.mem_req(ic_req), .mem_gnt(ic_gnt), .mem_rd(ic_rd), .mem_addr(ic_maddr),
 	.mem_busy(mem_busy), .mem_rdata(mem_rdata), .mem_rvalid(mem_rvalid)
 );
 
+// (while the table unit runs, the CPU waits in M with p8.hfind: no load,
+// store or p8.zline of its own)
 p8_dcache dcache (
 	.clk(clk), .reset(cpu_reset),
-	.e_addr(tu_active ? tu_addr : de_addr),
-	.m_addr(tu_active ? tu_addr : dm_addr),
+	.e_addr(de_addr), .m_addr(dm_addr),
 	// requesters that wait in M with a fixed address (registered signals)
 	.m_hold(tu_active || (dm_zline && m_ddr && !dc_zl_done)),
-	.m_rd(tu_active ? tu_rd : dm_rd && m_ddr), .m_wr(dm_wr && m_ddr && !tu_active),
-	.m_zl(dm_zline && m_ddr && !tu_active),
+	.m_rd(dm_rd && m_ddr), .m_wr(dm_wr && m_ddr), .m_zl(dm_zline && m_ddr),
 	.m_be(dm_be), .m_wdata(dm_wdata),
-	.rdata0(dc_rdata0), .rdata1(dc_rdata1), .rhit1(dc_rhit1), .rdata64_0(dc_rdata64_0), .rdata64_1(dc_rdata64_1), .ready(dc_ready), .zl_done(dc_zl_done),
-	.flush(fence_st == 2'd1), .flush_done(dc_flush_done),
+	.t_act(tu_active), .t_addr(tu_addr), .t_rd(tu_rd),
+	.rdata0(dc_rdata0), .rdata1(dc_rdata1), .rhit1(dc_rhit1), .rdata64_0(dc_rdata64_0), .rdata64_1(dc_rdata64_1),
+	.t_rhit1(dc_t_rhit1), .ready(dc_ready), .t_ready(dc_t_ready), .zl_done(dc_zl_done),
+	.flush(fence_st == 2'd1), .flush_done(dc_flush_done), .pm(dc_pm),
 	.mem_req(dc_req), .mem_gnt(dc_gnt), .mem_rd(dc_rd), .mem_we(dc_we),
 	.mem_addr(dc_maddr), .mem_wdata(dc_mwdata),
 	.mem_busy(mem_busy), .mem_rdata(mem_rdata), .mem_rvalid(mem_rvalid)
@@ -231,9 +234,9 @@ p8_ddr_arb arb (
 p8_tunit tunit (
 	.clk(clk), .reset(cpu_reset),
 	.start(dm_hfind), .num(dm_hnum), .base(p8heap), .tab(dm_addr), .key(dm_hkey),
-	.done(tu_done), .result(tu_result),
-	.active(tu_active), .addr(tu_addr), .rd(tu_rd), .ready(dc_ready),
-	.rdata0(dc_rdata64_0), .rdata1(dc_rdata64_1), .rsel1(dc_rhit1)
+	.done(tu_done), .result(tu_result), .pm_hit(tu_pm),
+	.active(tu_active), .addr(tu_addr), .rd(tu_rd), .ready(dc_t_ready),
+	.rdata0(dc_rdata64_0), .rdata1(dc_rdata64_1), .rsel1(dc_t_rhit1)
 );
 
 // FENCE.I: write back the D$, then invalidate the I$
@@ -250,34 +253,43 @@ end
 // ---------------------------------------------------------------- PICO-8 RAM
 
 wire        cp_req;
-wire [31:0] p8_q;
-// Any CPU load in E takes the read port (de_load is registered; the region
-// check needs the whole address add and would be late). M decides from the
-// registered address whether p8_q is used. The vblank copy gets the cycles
-// without a load in E. While the blitter runs (blt_own, a register) it has
-// both ports and the CPU runs on: its loads and stores to PICO-8 RAM are
-// replayed (dm_ready) from the cycle after its CTRL store until the
-// blitter is done (blt_hold: own lags the start by two cycles), so
-// software needs no fences; the copy waits. The CPU
-// computes the read address (ra_addr, its own add with the other address
-// muxed in before it) so the late E-stage address has no mux after it.
+wire [31:0] p8_q, p8_qr, p8_qc;
+// Two copies with the same writes (the blitter's, or the CPU's stores):
+// the CPU reads its own every cycle with E's address (cpu_raddr, its own
+// add: the late E-stage address has no mux after it, and the copy's 64 RAM
+// blocks serve no other reader); M decides from the registered address
+// whether p8_qc is used. The blitter (while it owns the RAM, blt_own, a
+// register) reads the other, else the vblank copy. While the blitter runs
+// the CPU runs on: its loads and stores to PICO-8 RAM are replayed
+// (dm_ready) from the cycle after its CTRL store until the blitter is done
+// (blt_hold: own lags the start by two cycles), so software needs no
+// fences. A load that read its copy in the cycle of a blitter write saw it
+// (the RAM's write bypass) or is replayed (own is high in the next cycle).
+// The blitter takes its data without the bypass (p8_qr): the CPU does not
+// write while it owns the RAM, and it never reads a word it writes in the
+// same cycle.
 wire        blt_we;
 wire [13:0] blt_waddr;
 wire [31:0] blt_wdata;
 wire        p8_we     = dm_wr && m_p8 && !blt_hold;
-// whether the load now in M had the read port in E (the port is granted in
-// E by blt_own; at the end of an operation a load can be in E while the
-// blitter still owns the port and reach M after the hold has dropped:
-// its data is the blitter's, so it is replayed)
-reg         p8_rd_q;
-always @(posedge clk) p8_rd_q <= cpu_p8_rd;
+wire [13:0] p8_raddr  = blt_own ? blt_raddr : cp_addr;
 
 genvar gi;
+// (the write port's select is kept once per copy: one would drive the
+// address of 128 RAM blocks)
 generate for (gi = 0; gi < 4; gi = gi + 1) begin : p8lane
+	(* keep = 1 *) wire        we_b = blt_we || (p8_we && dm_be[gi]);
+	(* keep = 1 *) wire [13:0] wa_b = blt_we ? blt_waddr : dm_addr[15:2];
+	(* keep = 1 *) wire        we_c = blt_we || (p8_we && dm_be[gi]);
+	(* keep = 1 *) wire [13:0] wa_c = blt_we ? blt_waddr : dm_addr[15:2];
+	wire  [7:0] wd = blt_we ? blt_wdata[gi*8 +: 8] : dm_wdata[gi*8 +: 8];
 	p8_bram #(.AW(14), .DW(8)) ram (
-		.clk(clk), .re(1'b1), .raddr(p8_raddr), .rdata(p8_q[gi*8 +: 8]), .rdata_raw(),
-		.we(blt_we || (p8_we && dm_be[gi])), .waddr(blt_we ? blt_waddr : dm_addr[15:2]),
-		.wdata(blt_we ? blt_wdata[gi*8 +: 8] : dm_wdata[gi*8 +: 8])
+		.clk(clk), .re(1'b1), .raddr(p8_raddr), .rdata(p8_q[gi*8 +: 8]), .rdata_raw(p8_qr[gi*8 +: 8]),
+		.we(we_b), .waddr(wa_b), .wdata(wd)
+	);
+	p8_bram #(.AW(14), .DW(8)) cram (
+		.clk(clk), .re(1'b1), .raddr(cpu_raddr), .rdata(p8_qc[gi*8 +: 8]), .rdata_raw(),
+		.we(we_c), .waddr(wa_c), .wdata(wd)
 	);
 end endgenerate
 
@@ -305,7 +317,7 @@ wire        blt_busy, blt_hold;
 p8_blit blit (
 	.clk(clk), .reset(cpu_reset),
 	.mmio_wr_in(mmio_wr), .mreg_in(mreg), .wdata_in(dm_wdata), .id(blt_id), .status(blt_busy), .hold(blt_hold),
-	.own(blt_own), .raddr(blt_raddr), .rdata(p8_q),
+	.own(blt_own), .raddr(blt_raddr), .rdata(p8_qr),
 	.we(blt_we), .waddr(blt_waddr), .wdat(blt_wdata)
 );
 
@@ -493,26 +505,23 @@ always @(posedge clk) begin
 	end
 end
 
-// Load data: the word from each D$ way (or the other source in both), and
-// the D$ hit way, which is late; the CPU aligns both words and selects last.
+// Load data: the word from each D$ way and the D$ hit way, which is late;
+// outside DDR the PICO-8 RAM's word or the MMIO value (dm_pdata,
+// dm_mdata, with dm_p8 / dm_mmio). The CPU aligns each and selects last,
+// so the D$ data has no source select in front of it. (p8.hfind's result
+// goes to the CPU on its own: dm_hres.)
+assign dm_rdata0 = dc_rdata0;
+assign dm_rdata1 = dc_rdata1;
+assign dm_rsel1  = dc_rhit1;
 always @* begin
-	dm_rsel1 = 1'b0;
-	// (p8.hfind's result goes to the CPU on its own: dm_hres)
-	if (m_ddr) begin
-		dm_ready  = dc_ready;
-		dm_rdata0 = dc_rdata0;
-		dm_rsel1  = dc_rhit1;
-	end else if (m_p8) begin
-		// replayed while the blitter runs (from its start), and a load
-		// that did not get the read port
-		dm_ready  = !blt_hold && (dm_wr || p8_rd_q);
-		dm_rdata0 = p8_q;
-	end else begin
+	if (m_ddr)
+		dm_ready = dc_ready;
+	else if (m_p8)
+		// replayed while the blitter runs (from its start)
+		dm_ready = !blt_hold;
+	else
 		// MMIO: a load is replayed once and takes the registered value
-		dm_ready  = !dm_rd || mmio_pend;
-		dm_rdata0 = mmio_q_r;
-	end
-	dm_rdata1 = dc_rdata1;
+		dm_ready = !dm_rd || mmio_pend;
 end
 
 
@@ -520,7 +529,7 @@ end
 
 p8_video #(.CLK_HZ(CLK_HZ)) video (
 	.clk(clk), .reset(reset),
-	.cp_addr(cp_addr), .cp_req(cp_req), .cp_gnt(cp_req && !cpu_p8_rd && !blt_own), .cp_rdata(p8_q),
+	.cp_addr(cp_addr), .cp_req(cp_req), .cp_gnt(cp_req && !blt_own), .cp_rdata(p8_q),
 	.present(mmio_wr && mreg == 10'h003), .show_fps(show_fps), .vcount(vcount),
 	.spin_wr(mmio_wr && mreg == 10'h00c), .spin_data(dm_wdata[15:0]),
 	.ce_pix(ce_pix), .r(r), .g(g), .b(b), .hs(hs), .vs(vs), .hblank(hblank), .vblank(vblank)

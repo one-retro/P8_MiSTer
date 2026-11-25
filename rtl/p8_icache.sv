@@ -1,5 +1,5 @@
 // Instruction cache: 64 KiB, 2-way set associative (LRU), 32-byte lines,
-// 64-bit RAMs.
+// RAMs written 64 bits at a time and read 32 (each with its predecode).
 //
 // Predecode: a line fill also stores, per instruction, what the CPU's
 // next-fetch logic needs: {JALR predicted (offset 0), a return (rd x0,
@@ -15,44 +15,51 @@
 // read together with the tags. `data` comes from that way (no tag compare
 // in the data path); a hit in the other way switches the prediction and
 // answers 2 cycles later (S_DONE; the CPU presents the address again). The MRU bit is also the LRU replacement choice.
+// The way is wanted all over the D stage (fetch address, decode, register
+// read, the hit), so the MRU RAM is kept in copies, one per group of
+// readers (the hit, `data`, and WAYS for the CPU: `way_q`): a RAM output
+// cannot be duplicated by the fitter, and one copy drove 168 loads, 2 ns
+// of routing on the fetch loop.
 //
 // `data`/`valid` answer for the current address q_addr, the last `addr`
-// presented with `adv` high (the CPU's d_pc). Without `adv` the RAMs are
-// not read and the output stays. `adv` is late (it depends on `valid`), so
-// it only drives read enables; the RAM address is `addr`, or q_addr when
-// the FSM re-reads it (S_DONE, where `valid` is low and the CPU advances
-// only on `redir`, an early signal). A miss starts a line fill from DDR (4 x 64-bit
+// presented with `adv` high (the CPU's d_pc). `adv` is late (it depends on
+// `valid`), so it only enables q_addr; the RAMs are read when `ren` is high
+// (the CPU advances or redirects; from registers) or the FSM is busy, and
+// otherwise keep their output. They may be read on a miss too: the FSM
+// re-reads q_addr before `valid` is high again (S_DONE). `reread` says the
+// FSM is in S_DONE: the CPU then presents q_addr (its d_pc) as `addr`,
+// unless it redirects. A miss starts a line fill from DDR (4 x 64-bit
 // burst); `valid` stays low until the line is present (S_DONE re-reads
-// q_addr). `adv` may come during a fill (a CPU redirect): the fill goes
-// on and S_DONE reads the new address.
+// q_addr). A redirect may come during a fill: the fill goes on and S_DONE
+// reads the new address.
 //
 // `inval` (level) invalidates everything; `inval_done` pulses when done.
 // Address bits above 24 are ignored (32 MiB of DDR). The RAMs are never
 // read in the cycle they are written (S_DONE after every write sequence),
 // so they need no bypass.
 
-module p8_icache (
+module p8_icache #(
+	parameter WAYS = 4            // copies of the MRU RAM (way_q)
+) (
 	input             clk,
 	input             reset,
 
 	input      [31:0] addr,
-	input             adv,
-	input             redir,      // adv while `valid` is low (registered in the CPU)
+	input             adv,        // the CPU takes `data` (late: enables q_addr only)
+	input             ren,        // read the RAMs at `addr` (early)
+	output            reread,     // S_DONE: `addr` must be q_addr unless the CPU redirects
 	output     [31:0] data,
 	output     [31:0] data0,      // the word in each way, and the way `data` is from
 	output     [31:0] data1,
 	output     [28:0] pre0,       // predecode of data0 / data1 (see above)
 	output     [28:0] pre1,
-	output            way_q,
-	// both words of the 64-bit line in each way and which one `data*` is
-	// (the CPU's register read decodes all four and selects last)
-	output     [63:0] line0,
-	output     [63:0] line1,
-	output            word_q,
+	output [WAYS-1:0] way_q,      // the predicted way, one copy per group of readers
 	output            valid,
 
 	input             inval,
 	output reg        inval_done,
+	// performance events: {way switch, fill cycle, line filled}
+	output reg  [2:0] pm,
 
 	// DDR client (see p8_ddr_arb)
 	output reg        mem_req,
@@ -84,17 +91,25 @@ reg [63:0] f_data;
 
 always @(posedge clk) if (adv) q_addr <= addr;
 
+// (a way switch: S_DONE straight after S_IDLE; from the state, not the
+// hit, which is on the fetch loop)
+reg st_idle_q;
 always @(posedge clk) begin
+	st_idle_q <= st == S_IDLE;
+	pm     <= {st == S_DONE && st_idle_q,
+	           st == S_REQ || st == S_FILL,
+	           st == S_FILL && mem_rvalid && beat == 2'd3};
 	f_we   <= st == S_FILL && mem_rvalid;
 	f_beat <= beat;
 	f_data <= mem_rdata;
 end
 
-// RAM read address and enable: in S_IDLE `addr` when the CPU advances; in
-// S_DONE the current address (or the new one if the CPU advances then;
-// adv is early outside S_IDLE). Reads in the other states do not matter.
-wire [31:0] r_addr = (st == S_DONE && !redir) ? q_addr : addr;
-wire        r_en   = st != S_IDLE || adv;
+// RAM read address and enable: `addr` (q_addr in S_DONE, chosen by the
+// CPU); in S_IDLE only when the CPU advances, else the output stays for
+// it. Reads in the other states, and on a miss, do not matter.
+wire [31:0] r_addr = addr;
+wire        r_en   = st != S_IDLE || ren;
+assign reread = st == S_DONE;
 
 // {jalr, ret, branch, pred, use rs1, use rs2, target[24:2]} of instruction x
 // at byte address pc
@@ -121,11 +136,16 @@ function automatic [28:0] predec(input [31:0] x, input [24:2] pc);
 	end
 endfunction
 
-wire [57:0] fill_pre = {predec(f_data[63:32], {line, f_beat, 1'b1}), predec(f_data[31:0], {line, f_beat, 1'b0})};
+// per word: {predecode, instruction}
+wire [121:0] fill_w = {predec(f_data[63:32], {line, f_beat, 1'b1}), f_data[63:32],
+                       predec(f_data[31:0], {line, f_beat, 1'b0}), f_data[31:0]};
 
-// per way: tag RAM {valid, tag} and data RAM {predecode hi, lo, words hi, lo}
+// per way: tag RAM {valid, tag} and data RAM, written a 64-bit beat (two
+// words) at a time and read a word at a time: the RAM selects the word by
+// address bit 2, so neither the fetch loop nor the register read has a
+// word select after it
 wire [TB:0] tag_q [0:1];
-wire [121:0] data_q [0:1];
+wire [60:0] data_q [0:1];
 reg         tag_we;
 reg [SB-1:0] tag_wa;
 reg  [TB:0] tag_wd;
@@ -135,26 +155,35 @@ generate for (gw = 0; gw < 2; gw = gw + 1) begin : w
 		.clk(clk), .re(r_en), .raddr(r_addr[SB+4:5]), .rdata(tag_q[gw]), .rdata_raw(),
 		.we(tag_we && (st == S_INIT || way == gw)), .waddr(tag_wa), .wdata(tag_wd)
 	);
-	p8_bram #(.AW(SB+2), .DW(122), .BYPASS(0)) lines (
-		.clk(clk), .re(r_en), .raddr(r_addr[SB+4:3]), .rdata(data_q[gw]), .rdata_raw(),
-		.we(f_we && way == gw), .waddr({line[SB-1:0], f_beat}), .wdata({fill_pre, f_data})
+	p8_bram_mw #(.AW(SB+2), .DW(61)) lines (
+		.clk(clk), .re(r_en), .raddr(r_addr[SB+4:2]), .rdata(data_q[gw]),
+		.we(f_we && way == gw), .waddr({line[SB-1:0], f_beat}), .wdata(fill_w)
 	);
 end endgenerate
 
-// most recently used way per set
-wire       mru_q;
+// most recently used way per set: copy 0 for the hit logic, copy 1 for
+// `data`, the others for the CPU (way_q). Odd copies hold the inverted
+// bit, so synthesis cannot merge them back into one RAM.
+wire [WAYS+1:0] mru_c;
+wire       mru_q = mru_c[0];
 reg        mru_we, mru_wd;
 reg [SB-1:0] mru_wa;
-p8_bram #(.AW(SB), .DW(1), .BYPASS(0)) mru (
-	.clk(clk), .re(r_en), .raddr(r_addr[SB+4:5]), .rdata(mru_q), .rdata_raw(),
-	.we(mru_we), .waddr(mru_wa), .wdata(mru_wd)
-);
+genvar gm;
+generate for (gm = 0; gm < WAYS + 2; gm = gm + 1) begin : m
+	localparam [0:0] INV = gm % 2 == 1;
+	wire q;
+	p8_bram #(.AW(SB), .DW(1), .BYPASS(0)) mru (
+		.clk(clk), .re(r_en), .raddr(r_addr[SB+4:5]), .rdata(q), .rdata_raw(),
+		.we(mru_we), .waddr(mru_wa), .wdata(mru_wd ^ INV)
+	);
+	assign mru_c[gm] = q ^ INV;
+end endgenerate
+assign way_q = mru_c[WAYS+1:2];
 
 wire [TB:0] ptag = mru_q ? tag_q[1] : tag_q[0];
 wire [TB:0] otag = mru_q ? tag_q[0] : tag_q[1];
 wire hit   = ptag[TB] && ptag[TB-1:0] == q_addr[24:SB+5];   // predicted way
 wire ohit  = otag[TB] && otag[TB-1:0] == q_addr[24:SB+5];   // the other way
-wire [63:0] hit_q = mru_q ? data_q[1][63:0] : data_q[0][63:0];
 // fill an invalid way first, else the least recently used one
 wire victim = !tag_q[0][TB] ? 1'b0 : !tag_q[1][TB] ? 1'b1 : !mru_q;
 
@@ -171,15 +200,11 @@ always @* begin
 end
 
 assign valid = st == S_IDLE && hit;
-assign data  = q_addr[2] ? hit_q[63:32] : hit_q[31:0];
-assign data0 = q_addr[2] ? data_q[0][63:32] : data_q[0][31:0];
-assign data1 = q_addr[2] ? data_q[1][63:32] : data_q[1][31:0];
-assign pre0  = q_addr[2] ? data_q[0][121:93] : data_q[0][92:64];
-assign pre1  = q_addr[2] ? data_q[1][121:93] : data_q[1][92:64];
-assign way_q = mru_q;
-assign line0 = data_q[0][63:0];
-assign line1 = data_q[1][63:0];
-assign word_q = q_addr[2];
+assign data  = mru_c[1] ? data_q[1][31:0] : data_q[0][31:0];
+assign data0 = data_q[0][31:0];
+assign data1 = data_q[1][31:0];
+assign pre0  = data_q[0][60:32];
+assign pre1  = data_q[1][60:32];
 assign mem_addr = {line, 2'b00};
 
 always @* begin
@@ -226,17 +251,15 @@ always @(posedge clk) begin
 				line    <= q_addr[24:5];
 				way     <= victim;
 				mem_req <= 1'b1;
+				mem_rd  <= 1'b1;   // the arbiter passes it on with the grant
 				st      <= S_REQ;
 			end
 		end
 		S_REQ: begin
-			if (mem_gnt) begin
-				mem_rd <= 1'b1;
-				if (mem_rd && !mem_busy) begin
-					mem_rd <= 1'b0;
-					beat   <= 2'd0;
-					st     <= S_FILL;
-				end
+			if (mem_gnt && !mem_busy) begin
+				mem_rd <= 1'b0;
+				beat   <= 2'd0;
+				st     <= S_FILL;
 			end
 		end
 		S_FILL: begin

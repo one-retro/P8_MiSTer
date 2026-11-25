@@ -193,7 +193,9 @@ reg  [4:0] i_slot;
 // map row: tile numbers and whether each is drawn, map pointer, tile
 // counter, bubble counter, destination words showing a drawn tile
 wire        mapop   = op == OP_MAP;
-reg   [7:0] tb [0:31];
+// (tb in registers: in a RAM block its write data had a long way from the
+// PICO-8 RAM's)
+(* ramstyle = "logic" *) reg [7:0] tb [0:31];
 reg  [31:0] tv;
 reg  [15:0] mp;
 reg   [4:0] ti;
@@ -274,7 +276,8 @@ wire [13:0] ld_a1    = {gbpage, 6'd0} + {sr[6:0], 4'd0} + {10'd0, lw + 4'd1};
 // pixel stage registers (sspr)
 reg         ld_v, p1_v, p1_first, p1_last;
 reg   [3:0] ld_w;
-reg   [2:0] p1_i, p1_c;
+reg   [2:0] p1_c;
+reg   [7:0] p1_oh;         // the pixel's nibble, one-hot (each merged bit is one LUT)
 reg         p1_cok;
 reg  [13:0] p1_addr;
 wire [31:0] rb_q;
@@ -508,7 +511,7 @@ always @(posedge clk) begin
 				p1_v     <= 1'b1;
 				p1_cok   <= row_ok && c[15:7] == 9'd0;
 				p1_c     <= c[2:0];
-				p1_i     <= pi;
+				p1_oh    <= 8'd1 << pi;
 				p1_first <= pfirst;
 				p1_last  <= pi == 3'd7 || pcnt == 7'd0;
 				p1_addr  <= daddr;
@@ -948,11 +951,11 @@ reg         w_v;
 reg  [13:0] w_addr;
 wire [31:0] p1_base = p1_first ? rdata : asm_w;
 wire  [7:0] p1_e    = r_pal[8 * p1_pix +: 8];
-wire  [3:0] p1_old  = p1_base[4 * p1_i +: 4];
 reg  [31:0] p1_word;
+integer pk;
 always @* begin
-	p1_word = p1_base;
-	p1_word[4 * p1_i +: 4] = (p1_old & p1_e[7:4]) | p1_e[3:0];
+	for (pk = 0; pk < 8; pk = pk + 1)
+		p1_word[4*pk +: 4] = p1_oh[pk] ? (p1_base[4*pk +: 4] & p1_e[7:4]) | p1_e[3:0] : p1_base[4*pk +: 4];
 end
 
 
@@ -967,7 +970,7 @@ reg        d1_v, d1_ok, d1_first, d1_second, d1_last;
 reg  [2:0] d1_kind;
 reg  [1:0] d1_phase, d1_bsel;
 reg  [7:0] d1_lm, d1_rm;
-reg  [4:0] d1_slot;
+reg [31:0] d1_wt, d1_wf;      // map row: d1 holds the tile / flag byte of slot k (one-hot)
 reg        wok_a, wok_b;      // map row: window words come from drawn tiles
 wire       d1_dst  = d1_kind == K_DST;
 wire [7:0] d1_byte = rdata[8 * d1_bsel +: 8];
@@ -993,13 +996,14 @@ end
 wire        td_v    = d1_v && d1_kind == K_TS;
 // the pixel's colour is registered first (tp: RAM data and the nibble
 // select, then the write table and the merge, in two cycles)
-reg   [3:0] tp_c, tp_nib;
+reg   [3:0] tp_c;
+reg   [7:0] tp_oh;         // the pixel's nibble, one-hot (each merged bit is one LUT)
 reg         tp_v, tp_pbit, tp_drawn, tp_first, tp_last;
 reg  [13:0] tp_wa;
 always @(posedge clk) begin
 	tp_v     <= !reset && td_v;
 	tp_c     <= rdata[4 * td_fx +: 4];
-	tp_nib   <= {1'b0, td_nib};
+	tp_oh    <= 8'd1 << td_nib;
 	tp_pbit  <= td_pbit;
 	tp_drawn <= td_drawn;
 	tp_first <= td_first;
@@ -1009,11 +1013,11 @@ end
 wire  [7:0] tp_t    = tp_pbit ? r_gmask[8 * tp_c +: 8] : r_pal[8 * tp_c +: 8];
 wire  [7:0] tp_e    = tp_drawn ? tp_t : 8'hf0;
 wire [31:0] tp_base = tp_first ? tdreg : tasm;
-wire  [3:0] tp_old  = tp_base[4 * tp_nib[2:0] +: 4];
 reg  [31:0] tp_word;
+integer tk;
 always @* begin
-	tp_word = tp_base;
-	tp_word[4 * tp_nib[2:0] +: 4] = (tp_old & tp_e[7:4]) | tp_e[3:0];
+	for (tk = 0; tk < 8; tk = tk + 1)
+		tp_word[4*tk +: 4] = tp_oh[tk] ? (tp_base[4*tk +: 4] & tp_e[7:4]) | tp_e[3:0] : tp_base[4*tk +: 4];
 end
 always @(posedge clk) begin
 	if (d1_v && d1_kind == K_TD) tdreg <= rdata;
@@ -1061,14 +1065,17 @@ reg [31:0] d2_old, d2_keep, d2_val;
 
 always @(posedge clk) begin
 	if (reset) begin
-		d1_v <= 1'b0;
-		d2_v <= 1'b0;
-		own  <= 1'b0;
+		d1_v  <= 1'b0;
+		d2_v  <= 1'b0;
+		own   <= 1'b0;
+		d1_wt <= 32'd0;
+		d1_wf <= 32'd0;
 	end else begin
 		d1_v     <= i_v;
+		d1_wt    <= (i_v && i_kind == K_TILE) ? 32'd1 << i_slot : 32'd0;
+		d1_wf    <= (i_v && i_kind == K_FLAG) ? 32'd1 << i_slot : 32'd0;
 		d1_kind  <= i_kind;
 		d1_bsel  <= i_bsel;
-		d1_slot  <= i_slot;
 		d1_ok    <= i_ok;
 		d1_first <= i_first;
 		d1_second <= i_second;
@@ -1093,14 +1100,18 @@ always @(posedge clk) begin
 	end
 end
 
-// map row: tile numbers and drawn flags
+// map row: tile numbers and drawn flags (the slot's enable decoded a stage
+// earlier: d1_wt / d1_wf)
+integer mk;
 always @(posedge clk) begin
 	if (start) tv <= 32'd0;
-	if (d1_v && d1_kind == K_TILE) begin
-		tb[d1_slot] <= d1_byte;
-		tv[d1_slot] <= d1_byte != 8'd0 || r_map1[8];
+	for (mk = 0; mk < 32; mk = mk + 1) begin
+		if (d1_wt[mk]) begin
+			tb[mk] <= d1_byte;
+			tv[mk] <= d1_byte != 8'd0 || r_map1[8];
+		end
+		if (d1_wf[mk] && (d1_byte & layers) == 8'd0) tv[mk] <= 1'b0;
 	end
-	if (d1_v && d1_kind == K_FLAG && (d1_byte & layers) == 8'd0) tv[d1_slot] <= 1'b0;
 end
 
 always @* begin

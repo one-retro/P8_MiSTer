@@ -56,6 +56,38 @@ to address 0. Every download holds the CPU in reset and restarts it at 0.
 | 0x200 | APU_ID    | R   | audio unit: `0x415055` ("APU") in bits 31-8, version in 7-0; 0 = no audio unit |
 | 0x204 - 0x21f | APU_* | R/W | audio unit registers (below) |
 
+## Performance counters (CSRs 0xc10-0xc1f)
+
+The CPU counts memory-system and pipeline events in 16 read-only 32-bit
+counters (wrapping, counting since power-up: a reset does not clear them,
+so take differences), `hpmcounter16`-`31` (CSRs 0xc10-0xc1f, also read as
+0xb10-0xb1f); `csrr` of any other unknown CSR reads 0, so software can
+read them on older cores too (all 0). Each counts a registered event, so
+a cycle's events are in the count a cycle or two later. The runtime
+returns them from `stat(200)`-`stat(215)`.
+
+| CSR | counts |
+|-----|--------|
+| 0xc10 | I$ line fills |
+| 0xc11 | I$ fill cycles (from the DDR request to the last beat) |
+| 0xc12 | I$ way switches: a hit in the way not predicted (2 cycles each) |
+| 0xc13 | D$ line fills (the CPU's and the table unit's) |
+| 0xc14 | D$ fill cycles (from the DDR request to the last beat) |
+| 0xc15 | D$ write-backs (dirty victims, FENCE.I) |
+| 0xc16 | D$ busy cycles (fills, copying a victim out, zeroing, flushes) |
+| 0xc17 | `p8.hfind` lookups answered from the table unit's lookup cache |
+| 0xc18 | replays: a load or store not answered (D$ miss, PICO-8 RAM while the blitter owns it, MMIO) |
+| 0xc19 | ... of those, PICO-8 RAM accesses while the blitter owns it |
+| 0xc1a | load-use stall cycles (a load, MUL, Zbb, CSR or `p8.hfind` result read at once; not while a load or store ahead is replayed) |
+| 0xc1b | cycles M waits (`p8.hfind`, `p8.zline`, FENCE.I) |
+| 0xc1c | divider stall cycles |
+| 0xc1d | mispredicted branches (2 bubbles each) |
+| 0xc1e | JALR redirects (an offset JALR: 2 bubbles; a mispredicted target: 3) |
+| 0xc1f | `p8.hfind` lookups |
+
+Fill cycles / fills is the DDR read latency plus the 4 beats and a cycle
+or two of the cache's own.
+
 ## Blitter (0x100-0x1bb)
 
 `rtl/p8_blit.sv` draws into PICO-8 RAM in hardware: unscaled sprite
@@ -81,9 +113,10 @@ and out-of-range coordinates (huge `sspr` sizes, negative source sizes).
 The CPU writes the registers and the operation to BLT_CTRL and goes on;
 before writing the next operation's registers it polls BLT_CTRL until the
 blitter is idle (one operation at a time, no queue). While busy the
-blitter owns both ports of PICO-8 RAM: the SoC holds the CPU's loads and
-stores to it, from the cycle after the CTRL store until the last write (a
-load that missed the read port is replayed), and the vblank copy waits.
+blitter owns PICO-8 RAM (its write port, and the read port of the copy the
+vblank copy also reads; the CPU reads a copy of its own): the SoC holds
+the CPU's loads and stores to it, from the cycle after the CTRL store
+until the last write (they are replayed), and the vblank copy waits.
 Code that does not touch PICO-8 RAM (Lua, the heap, audio) runs on. Throughput: a blit takes `rows * (1 + 2 * words) + 5` cycles
 (8 pixels per destination word; an 8x8 sprite 29 or 45 cycles), a fill or
 glyph `rows * words + 5`, a map row `tiles + 2` (+ `tiles + 2` with

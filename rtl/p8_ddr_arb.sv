@@ -2,8 +2,9 @@
 // save state port.
 //
 // A client raises `req` and keeps it high for its whole transaction
-// (address phase and every data beat); it may drive rd/we only while it
-// has `gnt`. Dropping `req` releases the bus; the grant is registered, so
+// (address phase and every data beat); its rd/we reach the DDR only while
+// it has `gnt` (so a cache raises rd with req, and the read goes out with
+// the grant). Dropping `req` releases the bus; the grant is registered, so
 // it changes one cycle after `req`. Priority: D$, I$, loader, save states.
 // `hold` stops new grants to the caches (used to quiesce the CPU before a
 // reset; the loader is not affected). There is no reset: the DDR
