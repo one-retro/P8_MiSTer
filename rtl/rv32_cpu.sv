@@ -61,9 +61,12 @@
 //   below 2^31; else (rs2 = 0, overflow) 0x7fffffff if the signs agree,
 //   else 0x80000001. On the divider, like DIV (the partial remainder starts
 //   at |rs1| >> 16: the quotient's first 16 bits are 0 when it fits).
+// - p8.stv rs2, imm(rs1) (custom-1, S-type, funct3 = a tag 0-7): the
+//   8-byte value {tag, rs2} (a Lua value: tag word, then payload) at an
+//   8-byte aligned address in SDRAM, one D$ write.
 // - CSR 0x7c1 (p8feat, read-only) lists these extensions: 1 number-key
-//   p8.hfind, 2 beqi/bnei, 4 JALR prediction, 8 p8.fdiv (earlier cores
-//   read 0).
+//   p8.hfind, 2 beqi/bnei, 4 JALR prediction, 8 p8.fdiv, 16 p8.stv
+//   (earlier cores read 0).
 // - p8.zline rs1 (custom-0, funct3 1): the D$ zeroes the 32-byte line at
 //   rs1 without reading memory; waits in M like a store.
 //
@@ -116,6 +119,8 @@ module rv32_cpu #(
 	output            dm_hfind,    // M holds p8.hfind: table dm_addr, key dm_hkey
 	output            dm_hnum,     // ... of a number key
 	output            dm_zline,    // M holds p8.zline: line dm_addr
+	output            dm_stv,      // the store is p8.stv: tag dm_tag, then dm_wdata
+	output      [2:0] dm_tag,
 	output     [31:0] dm_hkey,
 	output reg [31:0] p8heap,
 	input      [31:0] dm_rdata0,   // load data: dm_rsel1 ? dm_rdata1 : dm_rdata0
@@ -146,6 +151,7 @@ localparam OP_OP     = 7'b0110011;
 localparam OP_MISC   = 7'b0001111;
 localparam OP_SYSTEM = 7'b1110011;
 localparam OP_CUST0  = 7'b0001011;
+localparam OP_CUST1  = 7'b0101011;
 
 // ---------------------------------------------------------------- state
 
@@ -175,6 +181,8 @@ reg        e_hpm;          // a performance counter (e_imm[3:0])
 reg        e_csrf;
 reg        e_hnum;         // p8.hfind of a number key
 reg        e_fdv;          // p8.fdiv (e_div; e_f3 0: signed, the quotient)
+reg        e_stv;          // p8.stv (e_store, a word: e_f3 2), its tag
+reg  [2:0] e_tag;
 reg        e_jp;           // a predicted JALR (offset 0) ...
 reg [22:0] e_ptgt;         // ... and its predicted target [24:2]
 reg  [4:0] e_bimm;         // beqi / bnei immediate
@@ -200,7 +208,8 @@ reg        m_valid;
 reg [31:0] m_pc, m_result, m_addr, m_wdata, m_mul_a, m_mul_b, m_hkey, m_zb_b;
 reg  [3:0] m_be;
 reg  [4:0] m_rd;
-reg        m_wen, m_load, m_store, m_mul, m_fencei, m_hfind, m_hnum, m_zline, m_zbb, m_ldsel, m_dc;
+reg        m_wen, m_load, m_store, m_mul, m_fencei, m_hfind, m_hnum, m_zline, m_zbb, m_ldsel, m_dc, m_stv;
+reg  [2:0] m_tag;
 // load alignment, decoded in E from the size and the address's low bits
 // (early in its add): the byte for bits 7-0, bits 15-8 from the upper half
 // or the extension, bits 31-16 the extension, the byte whose bit 7 is the
@@ -253,6 +262,7 @@ wire d_csr    = opc == OP_SYSTEM && f3[1:0] != 2'd0;
 wire d_hfind  = opc == OP_CUST0 && f3 == 3'd0 && di[31:26] == 6'd0;   // funct7 0 or 1
 wire d_zline  = opc == OP_CUST0 && f3 == 3'd1 && di[31:25] == 7'd0;
 wire d_fdiv   = opc == OP_CUST0 && f3 == 3'd2 && di[31:25] == 7'd0;
+wire d_stv    = opc == OP_CUST1;
 
 // Zbb: {is Zbb, operation (m_zop)} of an OP (op) or OP-IMM (opimm)
 // instruction with bits 31-20 h and funct3 f. D needs only whether it is
@@ -289,7 +299,8 @@ wire       d_zbb = d_zd[5];
 // min[u] / max[u]: E's ALU does the compare (slt / sltu), M selects
 wire       d_zmm = d_op && di[31:25] == 7'b0000101 && f3[2];
 wire [2:0] d_f3  = d_zmm ? {2'b01, f3[0]} :   // min[u] / max[u]: slt[u]
-                   (d_op | d_opimm | d_branch | d_load | d_store | d_csr) ? f3 : 3'd0;
+                   (d_op | d_opimm | d_branch | d_load | d_store | d_csr) ? f3 :
+                   d_stv ? 3'd2 : 3'd0;   // p8.stv: a word store (and its tag)
 
 // uses rs1 / rs2: from the predecode (the I$ decodes them at the fill, for
 // the hazard check), so the forwarding selects do not wait for the decode
@@ -325,7 +336,7 @@ function automatic [31:0] imm_of(input [31:0] x);
 			imm_of = {{11{x[31]}}, x[31], x[19:12], x[20], x[30:21], 1'b0};
 		else if (o == OP_BRANCH)
 			imm_of = {{19{x[31]}}, x[31], x[7], x[30:25], x[11:8], 1'b0};
-		else if (o == OP_STORE)
+		else if (o == OP_STORE || o == OP_CUST1)   // and p8.stv
 			imm_of = {{20{x[31]}}, x[31:25], x[11:7]};
 		else if (o == OP_CUST0 && x[14:13] == 2'd0 && x[31:26] == 6'd0)
 			imm_of = 32'd0;   // p8.hfind, p8.zline
@@ -661,7 +672,9 @@ always @(posedge clk) begin
 		e_jal     <= d_jal;
 		e_jalr    <= d_jalr;
 		e_load    <= d_load;
-		e_store   <= d_store;
+		e_store   <= d_store || d_stv;
+		e_stv     <= d_stv;
+		e_tag     <= f3;
 		e_mul     <= d_muldiv && !f3[2];
 		e_div     <= (d_muldiv && f3[2]) || d_fdiv;
 		e_fdv     <= d_fdiv;
@@ -859,7 +872,7 @@ always @* begin
 		K_MISA:  csr_old = 32'h40001100;   // misa: RV32IM
 		K_MSCR:  csr_old = mscratch;
 		K_HEAP:  csr_old = p8heap;
-		K_FEAT:  csr_old = 32'd15;         // p8feat
+		K_FEAT:  csr_old = 32'd31;         // p8feat
 		default: csr_old = e_hpm ? pc_csr + {27'd0, pc_loc[e_imm[3:0]]} : 32'd0;
 	endcase
 	if (m_valid && e_csrf) csr_old = m_csr_v;
@@ -920,6 +933,8 @@ always @(posedge clk) begin
 		m_jp     <= e_jalr && e_jp;
 		m_ptgt   <= e_ptgt;
 		m_zline  <= e_zline;
+		m_stv    <= e_stv;
+		m_tag    <= e_tag;
 		m_hkey   <= fb;
 		m_f3     <= e_f3;
 		m_mul_a  <= fa;
@@ -953,6 +968,8 @@ assign dm_fencei = m_valid && m_fencei;
 assign dm_hfind  = m_valid && m_hfind;
 assign dm_hnum   = m_hnum;
 assign dm_zline  = m_valid && m_zline;
+assign dm_stv    = m_stv;
+assign dm_tag    = m_tag;
 assign dm_hkey   = m_hkey;
 
 // ---------------------------------------------------------------- M: multiply

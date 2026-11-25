@@ -121,6 +121,8 @@ wire [31:0] dm_addr, dm_wdata;
 wire        dm_rd, dm_wr, dm_fencei, dm_hfind, dm_hnum, dm_zline;
 wire [31:0] dm_hkey, p8heap;
 wire  [3:0] dm_be;
+wire        dm_stv;
+wire  [2:0] dm_tag;
 wire [31:0] dm_rdata0, dm_rdata1;
 wire        dm_rsel1;
 reg         dm_ready, dm_done;
@@ -145,7 +147,7 @@ rv32_cpu cpu (
 	.de_addr(de_addr), .ra_addr(cpu_raddr),
 	.dm_addr(dm_addr), .dm_rd(dm_rd), .dm_wr(dm_wr), .dm_be(dm_be),
 	.dm_wdata(dm_wdata), .dm_fencei(dm_fencei),
-	.dm_hfind(dm_hfind), .dm_hnum(dm_hnum), .dm_zline(dm_zline), .dm_hkey(dm_hkey), .p8heap(p8heap),
+	.dm_hfind(dm_hfind), .dm_hnum(dm_hnum), .dm_zline(dm_zline), .dm_stv(dm_stv), .dm_tag(dm_tag), .dm_hkey(dm_hkey), .p8heap(p8heap),
 	.dm_rdata0(dm_rdata0), .dm_rdata1(dm_rdata1), .dm_rsel1(dm_rsel1),
 	.dm_pdata(p8_qc), .dm_mdata(mmio_q_r), .dm_p8(m_p8), .dm_mmio(!m_ddr && !m_p8),
 	.dm_ready(dm_ready), .dm_done(dm_done),
@@ -197,7 +199,7 @@ p8_dcache dcache (
 	// requesters that wait in M with a fixed address (registered signals)
 	.m_hold(tu_active || (dm_zline && m_ddr && !dc_zl_done)),
 	.m_rd(dm_rd && m_ddr), .m_wr(dm_wr && m_ddr), .m_zl(dm_zline && m_ddr),
-	.m_be(dm_be), .m_wdata(dm_wdata),
+	.m_be(dm_be), .m_wdata(dm_wdata), .m_stv(dm_stv), .m_tag(dm_tag),
 	.t_act(tu_active), .t_addr(tu_addr), .t_rd(tu_rd),
 	.rdata0(dc_rdata0), .rdata1(dc_rdata1), .rhit1(dc_rhit1), .rdata64_0(dc_rdata64_0), .rdata64_1(dc_rdata64_1),
 	.t_rhit1(dc_t_rhit1), .ready(dc_ready), .t_ready(dc_t_ready), .zl_done(dc_zl_done),

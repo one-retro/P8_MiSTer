@@ -1,5 +1,5 @@
 #!/bin/sh
-# RV32IM, Zbb, hazard, performance counter, D$ write-back, divider and
+# RV32IM, Zbb, hazard, performance counter, D$ write-back, divider, p8.stv and
 # table-unit lookup cache self-tests (sim/tests) on the Verilator model of
 # p8_soc, under several DDR timings. Verilator and clang run in the
 # mister-p8-verilator Docker image (docker build -t mister-p8-verilator sim).
@@ -13,7 +13,7 @@ mkdir -p "$out"
 make -s -C sim docker > /dev/null
 sim=sim/obj_dir/Vp8_soc
 fail=0
-for t in isa:rv32im zbb:rv32im_zbb hazard:rv32im_zbb perf:rv32im mem:rv32im div:rv32im fdiv:rv32im hcache:rv32im; do
+for t in isa:rv32im zbb:rv32im_zbb hazard:rv32im_zbb perf:rv32im mem:rv32im div:rv32im fdiv:rv32im stv:rv32im hcache:rv32im; do
   n=${t%%:*}
   docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" -w /w $img \
     clang --target=riscv32 -march=${t#*:} -mabi=ilp32 -mno-relax -nostdlib -ffreestanding \

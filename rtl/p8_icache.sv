@@ -124,13 +124,14 @@ function automatic [28:0] predec(input [31:0] x, input [24:2] pc);
 		// JALR with offset 0 (the CPU checks rs1 against the prediction)
 		jr   = o == 7'b1100111 && x[14:12] == 3'd0 && x[31:20] == 12'd0;
 		ret  = jr && x[11:7] == 5'd0 && (x[19:15] == 5'd1 || x[19:15] == 5'd5);
-		// p8.hfind (funct7 0 string key, 1 number key), p8.zline, p8.fdiv
-		use1 = o == 7'b1100111 || br || o == 7'b0000011 || o == 7'b0100011 || o == 7'b0010011 ||
+		// p8.hfind (funct7 0 string key, 1 number key), p8.zline, p8.fdiv,
+		// p8.stv (custom-1, both like a store)
+		use1 = o == 7'b1100111 || br || o == 7'b0000011 || o == 7'b0100011 || o == 7'b0101011 || o == 7'b0010011 ||
 		       o == 7'b0110011 || (o == 7'b1110011 && x[13:12] != 2'd0 && !x[14]) ||
 		       (o == 7'b0001011 && x[14:13] == 2'd0 && x[31:26] == 6'd0) ||
 		       (o == 7'b0001011 && x[14:12] == 3'd2 && x[31:25] == 7'd0);
 		// beqi / bnei (funct3 2, 3): rs2 is an immediate
-		use2 = (br && x[14:13] != 2'b01) || o == 7'b0100011 || o == 7'b0110011 ||
+		use2 = (br && x[14:13] != 2'b01) || o == 7'b0100011 || o == 7'b0101011 || o == 7'b0110011 ||
 		       (o == 7'b0001011 && x[14:12] == 3'd0 && x[31:26] == 6'd0) ||
 		       (o == 7'b0001011 && x[14:12] == 3'd2 && x[31:25] == 7'd0);
 		imm  = jal ? {{5{x[31]}}, x[19:12], x[20], x[30:22]} : {{13{x[31]}}, x[7], x[30:25], x[11:9]};

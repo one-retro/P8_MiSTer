@@ -46,6 +46,8 @@ module p8_dcache (
 	input             m_zl,
 	input       [3:0] m_be,
 	input      [31:0] m_wdata,
+	input             m_stv,     // p8.stv: 8 bytes, {m_tag, m_wdata} (m_be all)
+	input       [2:0] m_tag,
 	input             t_act,     // the table unit's request
 	input      [31:0] t_addr,    // read now; answered next cycle
 	input             t_rd,
@@ -148,7 +150,9 @@ wire        st_hit = idle && m_wr && hit_c;
 assign ready   = idle && (!c_acc || (m_zl ? zl_done : hit_c));
 assign t_ready = idle && (!t_rd || hit_t);
 
-wire  [7:0] be8 = m_addr[2] ? {m_be, 4'b0000} : {4'b0000, m_be};
+wire  [7:0] be8 = m_stv ? 8'hff : m_addr[2] ? {m_be, 4'b0000} : {4'b0000, m_be};
+// the store's low word: p8.stv's tag, else the data (replicated in both)
+wire [31:0] wd_lo = m_stv ? {29'd0, m_tag} : m_wdata;
 wire        fill_we = st == S_FILL && mem_rvalid;
 wire        zero_we = st == S_ZERO;
 
@@ -167,7 +171,7 @@ generate for (gw = 0; gw < 2; gw = gw + 1) begin : w
 			.clk(clk), .re(1'b1), .raddr(d_ra), .rdata(data_q[gw][gi*8 +: 8]), .rdata_raw(),
 			.we(sel && (fill_we || zero_we || (st_hit && be8[gi]))),
 			.waddr(fill_we ? {line, beat} : zero_we ? {line, cnt[1:0]} : m_addr[13:3]),
-			.wdata(fill_we ? mem_rdata[gi*8 +: 8] : zero_we ? 8'd0 : m_wdata[(gi%4)*8 +: 8])
+			.wdata(fill_we ? mem_rdata[gi*8 +: 8] : zero_we ? 8'd0 : gi < 4 ? wd_lo[(gi%4)*8 +: 8] : m_wdata[(gi%4)*8 +: 8])
 		);
 	end
 end endgenerate
@@ -190,13 +194,16 @@ p8_bram #(.AW(9), .DW(1)) lru (
 // E's address, and the result registered: the load data meets no compare)
 reg         sb_hit, sb_way;
 reg   [7:0] sb_be;
-reg  [31:0] sb_d;
+reg  [31:0] sb_d, sb_lo;
 always @(posedge clk) begin
 	sb_hit <= st_hit && m_addr[13:3] == e_addr[13:3];
 	sb_way <= hit1_c;
 	sb_be  <= be8;
 	sb_d   <= m_wdata;
+	sb_lo  <= wd_lo;
 end
+// the bytes the load's word takes from the store (registers only)
+wire [31:0] sb_w = m_addr[2] ? sb_d : sb_lo;
 // the addressed word of a way, with the bytes the store wrote
 function automatic [31:0] word_of(input [63:0] q, input way_i);
 	reg [3:0] bs;
@@ -204,7 +211,7 @@ function automatic [31:0] word_of(input [63:0] q, input way_i);
 	begin
 		bs = {4{sb_hit && sb_way == way_i}} & (m_addr[2] ? sb_be[7:4] : sb_be[3:0]);
 		for (j = 0; j < 4; j = j + 1)
-			word_of[8*j +: 8] = bs[j] ? sb_d[8*j +: 8] : m_addr[2] ? q[32 + 8*j +: 8] : q[8*j +: 8];
+			word_of[8*j +: 8] = bs[j] ? sb_w[8*j +: 8] : m_addr[2] ? q[32 + 8*j +: 8] : q[8*j +: 8];
 	end
 endfunction
 assign rdata0  = word_of(data_q[0], 1'b0);
