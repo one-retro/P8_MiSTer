@@ -55,8 +55,15 @@
 //   in M like a load. CSR 0x7c0 (p8heap) holds the heap arena base for it.
 // - beqi / bnei rs1, imm5, offset (BRANCH funct3 2 / 3): compare rs1 with
 //   the unsigned immediate in the rs2 field.
+// - p8.fdiv rd, rs1, rs2 (custom-0, funct3 2, funct7 0): the PICO-8
+//   division of 16.16 numbers: rs2 = 1.0 gives rs1; otherwise
+//   floor(|rs1| * 2^16 / |rs2|) with the sign of rs1 ^ rs2 when it is
+//   below 2^31; else (rs2 = 0, overflow) 0x7fffffff if the signs agree,
+//   else 0x80000001. On the divider, like DIV (the partial remainder starts
+//   at |rs1| >> 16: the quotient's first 16 bits are 0 when it fits).
 // - CSR 0x7c1 (p8feat, read-only) lists these extensions: 1 number-key
-//   p8.hfind, 2 beqi/bnei, 4 JALR prediction (earlier cores read 0).
+//   p8.hfind, 2 beqi/bnei, 4 JALR prediction, 8 p8.fdiv (earlier cores
+//   read 0).
 // - p8.zline rs1 (custom-0, funct3 1): the D$ zeroes the 32-byte line at
 //   rs1 without reading memory; waits in M like a store.
 //
@@ -167,6 +174,7 @@ reg  [3:0] e_csrk;
 reg        e_hpm;          // a performance counter (e_imm[3:0])
 reg        e_csrf;
 reg        e_hnum;         // p8.hfind of a number key
+reg        e_fdv;          // p8.fdiv (e_div; e_f3 0: signed, the quotient)
 reg        e_jp;           // a predicted JALR (offset 0) ...
 reg [22:0] e_ptgt;         // ... and its predicted target [24:2]
 reg  [4:0] e_bimm;         // beqi / bnei immediate
@@ -244,6 +252,7 @@ wire d_muldiv = d_op && di[31:25] == 7'b0000001;
 wire d_csr    = opc == OP_SYSTEM && f3[1:0] != 2'd0;
 wire d_hfind  = opc == OP_CUST0 && f3 == 3'd0 && di[31:26] == 6'd0;   // funct7 0 or 1
 wire d_zline  = opc == OP_CUST0 && f3 == 3'd1 && di[31:25] == 7'd0;
+wire d_fdiv   = opc == OP_CUST0 && f3 == 3'd2 && di[31:25] == 7'd0;
 
 // Zbb: {is Zbb, operation (m_zop)} of an OP (op) or OP-IMM (opimm)
 // instruction with bits 31-20 h and funct3 f. D needs only whether it is
@@ -303,7 +312,7 @@ endfunction
 
 wire d_use1 = if_way[0] ? if_pre1[24] : if_pre0[24];
 wire d_use2 = if_way[0] ? if_pre1[23] : if_pre0[23];   // not beqi/bnei
-wire d_wen  = d_lui | d_auipc | d_jal | d_jalr | d_load | d_opimm | d_op | d_csr | d_hfind;
+wire d_wen  = d_lui | d_auipc | d_jal | d_jalr | d_load | d_opimm | d_op | d_csr | d_hfind | d_fdiv;
 
 // immediate of the word of each I$ way, selected by the (late) way last
 function automatic [31:0] imm_of(input [31:0] x);
@@ -654,7 +663,8 @@ always @(posedge clk) begin
 		e_load    <= d_load;
 		e_store   <= d_store;
 		e_mul     <= d_muldiv && !f3[2];
-		e_div     <= d_muldiv && f3[2];
+		e_div     <= (d_muldiv && f3[2]) || d_fdiv;
+		e_fdv     <= d_fdiv;
 		e_fencei  <= d_fencei;
 		e_pred    <= d_pred;
 		e_bk      <= f3[0] ^ d_pred;
@@ -664,7 +674,7 @@ always @(posedge clk) begin
 		e_zh      <= di[31:20];
 		e_zf      <= f3;
 		e_zo      <= d_op;
-		e_late    <= d_load || d_muldiv || d_hfind || d_zbb || d_csr;
+		e_late    <= d_load || d_muldiv || d_hfind || d_zbb || d_csr || d_fdiv;
 		e_pc4     <= d_pc4;
 		e_csr     <= d_csr;
 		e_csrk    <= csr_of(di[31:20]);
@@ -699,6 +709,10 @@ wire [33:0] div_sh  = {div_r, div_q[31:30]};
 wire [34:0] div_s1  = {1'b0, div_sh} - {3'd0, div_d};
 wire [34:0] div_s2  = {1'b0, div_sh} - {2'd0, div_d, 1'b0};
 wire [34:0] div_s3  = {1'b0, div_sh} - {1'b0, div_d3};
+// p8.fdiv: the saturated result, and the overflow (quotient >= 2^31:
+// |x| >> 15 >= |y|) found from the registers in the prep cycle
+wire [31:0] div_sat = (div_a[31] ^ div_b[31]) ? 32'h80000001 : 32'h7fffffff;
+wire        div_ovf = div_d[31:17] == 15'd0 && {div_r[15:0], div_q[31]} >= div_d[16:0];
 
 always @(posedge clk) begin
 	if (div_busy) begin
@@ -724,7 +738,13 @@ always @(posedge clk) begin
 		div_prep <= 1'b0;
 		div_d3   <= {2'd0, div_d} + {1'b0, div_d, 1'b0};
 		div_cnt  <= 5'd16;
-		div_busy <= 1'b1;
+		if (e_fdv && div_ovf) begin
+			div_q    <= div_sat;
+			div_negq <= 1'b0;
+			div_done <= 1'b1;
+		end else begin
+			div_busy <= 1'b1;
+		end
 	end else if (div_done) begin
 		// result is consumed when the instruction leaves E
 		if (!stall_m) div_done <= 1'b0;
@@ -732,14 +752,15 @@ always @(posedge clk) begin
 		div_init <= 1'b0;
 		div_negq <= 1'b0;
 		div_negr <= 1'b0;
-		if (div_b == 32'd0) begin
-			// x/0 = all ones, x%0 = x
-			div_q    <= 32'hffffffff;
+		if (div_b == 32'd0 || (e_fdv && div_b == 32'h10000)) begin
+			// x/0 = all ones, x%0 = x; p8.fdiv: x/0 saturates, x/1.0 = x
+			div_q    <= !e_fdv ? 32'hffffffff : div_b[16] ? div_a : div_sat;
 			div_r    <= div_a;
 			div_done <= 1'b1;
 		end else begin
-			div_q    <= div_aa;
-			div_r    <= 32'd0;
+			// p8.fdiv: the dividend |x| * 2^16
+			div_q    <= e_fdv ? {div_aa[15:0], 16'd0} : div_aa;
+			div_r    <= e_fdv ? {16'd0, div_aa[31:16]} : 32'd0;
 			div_d    <= div_ba;
 			div_negq <= div_sgn && (div_a[31] ^ div_b[31]);
 			div_negr <= div_sgn && div_a[31];
@@ -838,7 +859,7 @@ always @* begin
 		K_MISA:  csr_old = 32'h40001100;   // misa: RV32IM
 		K_MSCR:  csr_old = mscratch;
 		K_HEAP:  csr_old = p8heap;
-		K_FEAT:  csr_old = 32'd7;          // p8feat
+		K_FEAT:  csr_old = 32'd15;         // p8feat
 		default: csr_old = e_hpm ? pc_csr + {27'd0, pc_loc[e_imm[3:0]]} : 32'd0;
 	endcase
 	if (m_valid && e_csrf) csr_old = m_csr_v;

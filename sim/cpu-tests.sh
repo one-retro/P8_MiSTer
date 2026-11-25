@@ -13,7 +13,7 @@ mkdir -p "$out"
 make -s -C sim docker > /dev/null
 sim=sim/obj_dir/Vp8_soc
 fail=0
-for t in isa:rv32im zbb:rv32im_zbb hazard:rv32im_zbb perf:rv32im mem:rv32im div:rv32im hcache:rv32im; do
+for t in isa:rv32im zbb:rv32im_zbb hazard:rv32im_zbb perf:rv32im mem:rv32im div:rv32im fdiv:rv32im hcache:rv32im; do
   n=${t%%:*}
   docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/w" -w /w $img \
     clang --target=riscv32 -march=${t#*:} -mabi=ilp32 -mno-relax -nostdlib -ffreestanding \

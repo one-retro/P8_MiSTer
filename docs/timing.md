@@ -5,19 +5,23 @@ setup slack of the core clock, in ns, over seeds 1-11: the RTL before the
 timing work of 2026-11-23 (described below), after it, and with the
 memory system of 2026-11-24 (D$ request with the miss and a write-back
 buffer, radix-4 divider, the table unit's lookup cache, performance
-counters; see the end):
+counters; see the end), and with `p8.fdiv` on the divider (that evening):
 
 | seed       | 1      | 2      | 3      | 4      | 5      | 6      | 7      | 8      | 9      | 10     | 11     |
 |------------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|--------|
 | before     | +0.028 | +0.029 | -0.214 | +0.007 | -0.488 | -0.013 | -0.405 | +0.132 | -0.327 | -0.101 | -0.589 |
 | 2026-11-23 | +0.179 | -0.383 | +0.164 | +0.290 | +0.271 | +0.174 | +0.209 | +0.322 | -0.379 | -0.013 | -0.674 |
 | 2026-11-24 | -0.190 | -0.085 | -0.065 | +0.072 | -0.137 | +0.080 | -0.062 | -0.210 | +0.149 | -0.017 | -0.172 |
+| + p8.fdiv  | -0.507 | -0.089 | -0.213 | +0.207 | +0.364 | +0.183 | +0.287 | -0.385 | +0.181 | -0.099 | +0.189 |
 
 The timing work took the mean from -0.18 to +0.02 ns (7 seeds of 11
 passing instead of 4); the memory system gave back 0.07 ns of it (mean
 -0.06 ns, 3 of 11 passing: the spread is narrower, its centre just under
-0). The project builds with seed 9 (+0.149 ns setup, +0.247 ns hold, HDMI
-+0.478 ns). Check every clock in the timing summary: at seed 4 of the
+0). `p8.fdiv` (the divider's start state for a 16.16 dividend, the
+overflow check in its prep cycle, two more predecode terms) costs
+nothing: mean +0.01 ns, 6 of 11 passing, the spread of any netlist
+change. The project builds with seed 5 (+0.364 ns setup, +0.133 ns hold,
+HDMI +0.541 ns). Check every clock in the timing summary: at seed 4 of the
 2026-11-23 RTL the core clock passed but the framework's HDMI clock
 missed by 0.018 ns.
 
@@ -103,6 +107,27 @@ average: the change moved the whole placement) and one PICO-8 RAM address
 add per byte lane. A 128 KiB I$ (`SB = 11`: twice the RAM blocks on the
 fetch address, 525 of 553 in all) failed the fetch loop on every seed of
 1-6, by 0.17-0.63 ns.
+
+Tried and dropped on 2026-11-24 (evening), to win back margin on the
+forwarding loops: W's early results (ALU, jumps) in a register of their
+own beside w_val, so retiming's move of w_val's register into the load
+data's select would not reach them; operand b holding the I-type
+immediate (selected in D), taking the immediate select off the shifter
+and the compare; LUI / AUIPC through the link's path; a copy of the D$
+tags without the write bypass for the hit compares, and four copies of
+the hit way for the load data select; 2-bit encoded forward selects in
+copies per consumer. Over seeds 1-6 it did not beat the RTL without it
+(mean -0.075 ns, 3 passing, against -0.009 ns, 3 passing): the ALU loop
+got shorter, but a load result's forward path stays retimed (the D$ hit
+compare into W, then W's select in front of E), the operand registers'
+hold select grew, and the encoded selects first sat a LUT deeper in D,
+after the I$ way RAM (-0.20 ns mean; computed per I$ way, they needed
+`keep` on the per-way compares, or synthesis compared the way-selected
+word instead). The RTL is kept in the studio build area (rtl-build/t15).
+What limits this RTL is the load-use loop (D$ tag RAM, hit, W, the
+forwarding select, the ALU or the address add), which retiming balances
+across M and E: a D$ way prediction (like the I$'s) would take the tag
+compare off the load data.
 
 Tried and dropped: retiming off (above); register copies of `rd_pend`
 kept out of retiming, and the map row's tile table in LUT RAM (both worse

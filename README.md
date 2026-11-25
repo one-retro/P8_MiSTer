@@ -84,7 +84,7 @@ No SDRAM module is needed: the core uses 32 MiB of the HPS DDR3, and
 |---|---|
 | `p8.sv` | MiSTer glue (`emu`): hps_io, PLL, joystick/keyboard mapping, video_mixer, audio |
 | `rtl/p8_soc.sv` | CPU, caches, PICO-8 RAM, MMIO, reset/download sequencing |
-| `rtl/rv32_cpu.sv` | RV32IM + Zbb pipeline (D/E/M/W), forwarding, branch prediction (static rule + 1K agree counters), Zbb in M, 1-cycle multiply (DSP), radix-4 divider (19 cycles), FENCE.I, counters + mscratch CSRs, performance counters (CSRs 0xc10-0xc1f, see `docs/hardware.md`), `p8.hfind` (custom-0) and its `p8heap` CSR (0x7c0), the `p8feat` CSR (0x7c1) listing the extensions |
+| `rtl/rv32_cpu.sv` | RV32IM + Zbb pipeline (D/E/M/W), forwarding, branch prediction (static rule + 1K agree counters), Zbb in M, 1-cycle multiply (DSP), radix-4 divider (19 cycles; also `p8.fdiv`, the PICO-8 16.16 division), FENCE.I, counters + mscratch CSRs, performance counters (CSRs 0xc10-0xc1f, see `docs/hardware.md`), `p8.hfind` (custom-0) and its `p8heap` CSR (0x7c0), the `p8feat` CSR (0x7c1) listing the extensions |
 | `rtl/p8_icache.sv` | 64 KiB 2-way (LRU) I$, 32-byte lines, predecoded branch targets |
 | `rtl/p8_tunit.sv` | table unit: runs `p8.hfind` (hash-part lookup of a string or number key) through the D$, 64 bits per access, with a 256-entry lookup cache of where keys were found |
 | `rtl/p8_dcache.sv` | 32 KiB 2-way (LRU) write-back D$, 32-byte lines (a dirty victim goes to a buffer and is written back after the fill), write-back-all for FENCE.I, line zeroing for `p8.zline` |
