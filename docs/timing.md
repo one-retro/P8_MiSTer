@@ -155,3 +155,22 @@ loop, the single-cycle forwarding loop through the ALU and the load data
 loop (D$ RAM, W, forwarding, D$ address) would need more pipeline stages
 (a registered I$ output, registered load data), at a cost in cycles per
 instruction, and the framework's scaler input runs on the same clock.
+
+Dual issue (a study, not in the RTL): rv32sim's `dual_issue` modes say
+how much pairing an ALU instruction with the one before it would save on
+the 31 benchmark carts: 8.1% of cycles with only an independent ALU op as
+the second (8.6% once p8c orders code for it, `P8C_DUAL=1`), 11.1% /
+11.7% when the second may also be a load or store, 15% with pairs at any
+address (not only an even word and the next). A timing proxy of the
+first mode (studio rtl-build/t22: lane 2's decode, the pairing check, a
+second ALU with forwarding from both lanes into both, the fetch address
+`d_pc + 8` when the decode pair issues; its results are only XORed into
+a CSR) missed by 1.33 ns over seeds 1-6 (all failing; this RTL -0.07 ns,
+2 passing), with 2% more ALMs. Nearly all its failing paths were the I$
+fetch loop: the pairing decision, made on the word the I$ RAM just
+delivered, chose the next fetch address (-1.0 to -1.6 ns); the doubled
+forwarding into the ALUs came next (e2 operands into m2_result, -0.5 to
+-0.7 ns). At 100 / (10 + 1.33) MHz the saving would be gone. A design
+worth trying would take pairing off the fetch loop (predecoded pair bits
+written into the I$ on a fill, or a fetch queue two words wide that runs
+ahead of issue) and keep lane 2's forwarding to lane 1's results only.
